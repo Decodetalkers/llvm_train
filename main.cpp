@@ -14,9 +14,11 @@ using namespace std::string_view_literals;
 static const llvm::Regex importRegex = llvm::Regex("import: ([^ ]*) ([^ ]*.gcm)");
 static const llvm::Regex moduleRegex = llvm::Regex("module: ([^ ]*)");
 static const llvm::Regex sourceRegex = llvm::Regex("source: ([^ ]*)");
-static const llvm::Regex cwdregex    = llvm::Regex("cwd: ([^ ]*)");
+static const llvm::Regex cwdRegex    = llvm::Regex("cwd: ([^ ]*)");
 
-constexpr auto EXAMPLE_ELF = R"(
+static const llvm::Regex modmapRegex = llvm::Regex("([^ ^$^\n]*) ([^ ]*.gcm)");
+
+static constexpr auto EXAMPLE_ELF = R"(
 dump of section '.gnu.c++.README':
   [     0]  GNU C++ primary interface
   [    1a]  compiler: 16.1.1 20260430
@@ -32,7 +34,50 @@ dump of section '.gnu.c++.README':
   [   101]  import: alpha alpha.gcm
 )"sv;
 
+static constexpr auto EXAMPLE_ROADMAP = R"(
+$root .
+hellob CMakeFiles/foo.dir/hellob.gcm
+beta CMakeFiles/foo.dir/beta.gcm
+)"sv;
+
 namespace {
+struct RoadMapInfo
+{
+    std::string name;
+    std::string path;
+};
+
+std::vector<RoadMapInfo>
+read_roadmap(llvm::StringRef cmd, llvm::StringRef content)
+{
+    std::vector<RoadMapInfo> result = {};
+    llvm::StringRef text            = content;
+    while (!text.empty()) {
+        llvm::SmallVector<llvm::StringRef, 2> matches;
+        std::string error;
+        if (!modmapRegex.match(text, &matches, &error)) {
+            break;
+        }
+
+        auto name = matches[1].trim().str();
+
+        auto read_path = matches[2].trim();
+        std::string path;
+        if (llvm::sys::path::is_absolute(read_path)) {
+            path = read_path.str();
+        } else {
+            llvm::SmallString<128> current_path = cmd;
+            llvm::sys::path::append(current_path, read_path);
+            path = current_path.str();
+        }
+        result.push_back(RoadMapInfo{name, path});
+
+        size_t pos  = text.find(matches[0]);
+        text = text.drop_front(pos + matches[0].size());
+    }
+    return result;
+}
+
 struct ReadElfInfo
 {
     std::string source;
@@ -53,20 +98,17 @@ ReadElfInfo::get(llvm::StringRef content)
         llvm::StringRef cwd_text = content;
         llvm::SmallVector<llvm::StringRef, 1> matches;
         std::string error;
-        if (!cwdregex.match(cwd_text, &matches, &error)) {
-            std::println("match failed: {}", error);
+        if (!cwdRegex.match(cwd_text, &matches, &error)) {
             return std::nullopt;
         }
         cwd = matches[1].trim().str();
     }
     {
         llvm::StringRef import_text = content;
-
         while (!import_text.empty()) {
             llvm::SmallVector<llvm::StringRef, 2> matches;
             std::string error;
             if (!importRegex.match(import_text, &matches, &error)) {
-                std::println("match failed: {}", error);
                 break;
             }
 
@@ -82,7 +124,6 @@ ReadElfInfo::get(llvm::StringRef content)
         llvm::SmallVector<llvm::StringRef, 1> matches;
         std::string error;
         if (!sourceRegex.match(source_text, &matches, &error)) {
-            std::println("match failed: {}", error);
             return std::nullopt;
         }
         llvm::StringRef path_ref            = cwd;
@@ -154,6 +195,11 @@ main(int argc, char *argv[])
         }
         std::println("module name: {}", info->moduleName);
         std::println("source path: {}", info->source);
+    }
+    auto from_map = read_roadmap("/home/user/hello", EXAMPLE_ROADMAP);
+    for (const auto map : from_map) {
+        std::println("name: {}", map.name);
+        std::println("path: {}", map.path);
     }
     return 0;
 }
